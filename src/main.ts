@@ -2,13 +2,16 @@ import { Plugin } from "obsidian";
 import { RangeSetBuilder, StateEffect, StateField } from "@codemirror/state";
 import { Decoration, DecorationSet, EditorView, ViewPlugin } from "@codemirror/view";
 
-const FLASH_DURATION_MS = 650;
+const LOST_KEYUP_FALLBACK_MS = 5000;
+const NON_KEYBOARD_COPY_FALLBACK_MS = 650;
 const MAX_DOM_FLASH_RECTS = 80;
 
 type FlashRange = {
 	from: number;
 	to: number;
 };
+
+type ClearHighlight = () => void;
 
 const addFlash = StateEffect.define<FlashRange[]>();
 const clearFlash = StateEffect.define<void>();
@@ -47,15 +50,100 @@ const flashField = StateField.define<DecorationSet>({
 	provide: (field) => EditorView.decorations.from(field),
 });
 
-function copyFlashExtension(durationMs: number) {
+class HighlightSession {
+	private clearers = new Set<ClearHighlight>();
+	private ctrlOrMetaDown = false;
+	private cDown = false;
+	private fallbackTimer: number | null = null;
+
+	register(clearHighlight: ClearHighlight) {
+		this.clearers.add(clearHighlight);
+
+		return () => {
+			this.clearers.delete(clearHighlight);
+		};
+	}
+
+	handleKeyDown(event: KeyboardEvent) {
+		if (event.key === "Control" || event.key === "Meta") {
+			this.ctrlOrMetaDown = true;
+		}
+
+		if (event.key.toLowerCase() === "c") {
+			this.cDown = true;
+		}
+	}
+
+	handleKeyUp(event: KeyboardEvent) {
+		if (event.key === "Control" || event.key === "Meta") {
+			this.ctrlOrMetaDown = false;
+		}
+
+		if (event.key.toLowerCase() === "c") {
+			this.cDown = false;
+		}
+
+		if (!this.isCopyChordHeld()) {
+			this.clear();
+		}
+	}
+
+	beginCopyHighlight() {
+		if (this.fallbackTimer !== null) {
+			window.clearTimeout(this.fallbackTimer);
+		}
+
+		const fallbackMs = this.isCopyChordHeld()
+			? LOST_KEYUP_FALLBACK_MS
+			: NON_KEYBOARD_COPY_FALLBACK_MS;
+
+		// This is only a cleanup guard. Normal Ctrl/Cmd+C clears on keyup.
+		this.fallbackTimer = window.setTimeout(() => {
+			this.clear();
+		}, fallbackMs);
+	}
+
+	clear() {
+		if (this.fallbackTimer !== null) {
+			window.clearTimeout(this.fallbackTimer);
+			this.fallbackTimer = null;
+		}
+
+		for (const clearHighlight of this.clearers) {
+			clearHighlight();
+		}
+	}
+
+	resetKeys() {
+		this.ctrlOrMetaDown = false;
+		this.cDown = false;
+		this.clear();
+	}
+
+	private isCopyChordHeld() {
+		return this.ctrlOrMetaDown && this.cDown;
+	}
+}
+
+function copyFlashExtension(highlightSession: HighlightSession) {
 	class CopyFlashView {
-		private clearTimer: number | null = null;
+		private unregister: (() => void) | null = null;
 
 		constructor(private view: EditorView) {}
 
+		registerClearer() {
+			if (this.unregister === null) {
+				this.unregister = highlightSession.register(() => {
+					this.view.dispatch({
+						effects: clearFlash.of(),
+					});
+				});
+			}
+		}
+
 		destroy() {
-			if (this.clearTimer !== null) {
-				window.clearTimeout(this.clearTimer);
+			if (this.unregister !== null) {
+				this.unregister();
 			}
 		}
 
@@ -71,20 +159,11 @@ function copyFlashExtension(durationMs: number) {
 				return;
 			}
 
-			if (this.clearTimer !== null) {
-				window.clearTimeout(this.clearTimer);
-			}
-
+			this.registerClearer();
 			this.view.dispatch({
 				effects: addFlash.of(ranges),
 			});
-
-			this.clearTimer = window.setTimeout(() => {
-				this.view.dispatch({
-					effects: clearFlash.of(),
-				});
-				this.clearTimer = null;
-			}, durationMs);
+			highlightSession.beginCopyHighlight();
 		}
 	}
 
@@ -107,8 +186,33 @@ function copyFlashExtension(durationMs: number) {
 }
 
 export default class CopyFlasherPlugin extends Plugin {
+	private highlightSession = new HighlightSession();
+	private domHighlights = new Set<HTMLElement>();
+
 	async onload() {
-		this.registerEditorExtension(copyFlashExtension(FLASH_DURATION_MS));
+		this.highlightSession.register(() => {
+			this.clearDomHighlights();
+		});
+
+		this.registerEditorExtension(copyFlashExtension(this.highlightSession));
+
+		this.registerDomEvent(document, "keydown", (event) => {
+			this.highlightSession.handleKeyDown(event);
+		}, true);
+
+		this.registerDomEvent(document, "keyup", (event) => {
+			this.highlightSession.handleKeyUp(event);
+		}, true);
+
+		this.registerDomEvent(window, "blur", () => {
+			this.highlightSession.resetKeys();
+		});
+
+		this.registerDomEvent(document, "visibilitychange", () => {
+			if (document.visibilityState === "hidden") {
+				this.highlightSession.resetKeys();
+			}
+		});
 
 		// CodeMirror handles editor selections. This fallback covers copied text in
 		// rendered Markdown or other Obsidian-owned DOM content.
@@ -147,6 +251,8 @@ export default class CopyFlasherPlugin extends Plugin {
 		for (let index = 0; index < selection.rangeCount; index += 1) {
 			this.flashRange(selection.getRangeAt(index));
 		}
+
+		this.highlightSession.beginCopyHighlight();
 	}
 
 	private flashRange(range: Range) {
@@ -164,7 +270,15 @@ export default class CopyFlasherPlugin extends Plugin {
 			overlay.style.height = `${rect.height}px`;
 
 			document.body.appendChild(overlay);
-			window.setTimeout(() => overlay.remove(), FLASH_DURATION_MS);
+			this.domHighlights.add(overlay);
 		}
+	}
+
+	private clearDomHighlights() {
+		for (const highlight of this.domHighlights) {
+			highlight.remove();
+		}
+
+		this.domHighlights.clear();
 	}
 }

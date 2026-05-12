@@ -1,32 +1,12 @@
 .copy-flasher-editor-highlight {
-	background-color: rgba(255, 213, 79, 0.45);
+	background-color: rgba(255, 213, 79, 0.5);
 	border-radius: 3px;
-	animation: copy-flasher-editor-fade 650ms ease-out forwards;
 }
 
 .copy-flasher-dom-highlight {
 	position: absolute;
 	z-index: 9999;
 	pointer-events: none;
-	background-color: rgba(255, 213, 79, 0.42);
+	background-color: rgba(255, 213, 79, 0.46);
 	border-radius: 3px;
-	animation: copy-flasher-dom-fade 650ms ease-out forwards;
-}
-
-@keyframes copy-flasher-editor-fade {
-	0% {
-		background-color: rgba(255, 213, 79, 0.62);
-	}
-	100% {
-		background-color: rgba(255, 213, 79, 0);
-	}
-}
-
-@keyframes copy-flasher-dom-fade {
-	0% {
-		opacity: 1;
-	}
-	100% {
-		opacity: 0;
-	}
 }
