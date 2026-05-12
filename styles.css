@@ -1,6 +1,6 @@
 .copy-flasher-editor-highlight {
-	background-color: rgba(255, 213, 79, 0.5);
-	border-radius: 3px;
+	background-color: var(--copy-flasher-editor-background, rgba(255, 213, 79, 0.5));
+	border-radius: var(--copy-flasher-border-radius, 3px);
 }
 
 .copy-flasher-dom-highlight {
@@ -8,5 +8,5 @@
 	z-index: 9999;
 	pointer-events: none;
 	background-color: rgba(255, 213, 79, 0.46);
-	border-radius: 3px;
+	border-radius: var(--copy-flasher-border-radius, 3px);
 }

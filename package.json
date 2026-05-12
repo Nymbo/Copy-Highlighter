@@ -1,6 +1,6 @@
 {
 	"name": "copy-flasher",
-	"version": "0.1.0",
+	"version": "0.1.1",
 	"description": "Briefly highlights text copied inside Obsidian.",
 	"main": "main.js",
 	"type": "module",
