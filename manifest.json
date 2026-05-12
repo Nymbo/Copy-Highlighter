@@ -1,9 +1,9 @@
 {
 	"id": "copy-highlighter",
 	"name": "Copy Highlighter",
-	"version": "0.2.0",
+	"version": "0.2.1",
 	"minAppVersion": "0.16.0",
-	"description": "Highlights copied text in Obsidian.",
+	"description": "Highlights copied text.",
 	"author": "Nymbo",
 	"authorUrl": "https://github.com/Nymbo",
 	"isDesktopOnly": false
