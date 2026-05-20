@@ -1,5 +1,5 @@
 import { App, Plugin, PluginSettingTab, Setting } from "obsidian";
-import { RangeSetBuilder, StateEffect, StateField } from "@codemirror/state";
+import { StateEffect, StateField } from "@codemirror/state";
 import { Decoration, DecorationSet, EditorView, ViewPlugin } from "@codemirror/view";
 
 const LOST_KEYUP_FALLBACK_MS = 5000;
@@ -19,6 +19,7 @@ interface CopyHighlighterSettings {
 type FlashRange = {
 	from: number;
 	to: number;
+	kind: "mark" | "line";
 };
 
 type ClearHighlight = () => void;
@@ -40,6 +41,10 @@ const flashMark = Decoration.mark({
 	class: "copy-highlighter-editor-highlight",
 });
 
+const flashLine = Decoration.line({
+	class: "copy-highlighter-editor-line-highlight",
+});
+
 const flashField = StateField.define<DecorationSet>({
 	create() {
 		return Decoration.none;
@@ -53,15 +58,15 @@ const flashField = StateField.define<DecorationSet>({
 			}
 
 			if (effect.is(addFlash)) {
-				const builder = new RangeSetBuilder<Decoration>();
-
-				for (const range of effect.value) {
-					if (range.from < range.to) {
-						builder.add(range.from, range.to, flashMark);
-					}
-				}
-
-				decorations = builder.finish();
+				decorations = Decoration.set(
+					effect.value
+						.filter((range) => range.kind === "line" || range.from < range.to)
+						.map((range) => {
+							const decoration = range.kind === "line" ? flashLine : flashMark;
+							return decoration.range(range.from, range.to);
+						}),
+					true
+				);
 			}
 		}
 
@@ -171,12 +176,17 @@ function copyFlashExtension(highlightSession: HighlightSession) {
 		}
 
 		flashCopiedSelection() {
-			const ranges = this.view.state.selection.ranges
+			const copiedRanges = this.view.state.selection.ranges
 				.filter((range) => !range.empty)
 				.map((range) => ({
 					from: range.from,
 					to: range.to,
+					kind: "mark" as const,
 				}));
+			const ranges = [
+				...copiedRanges,
+				...findSelectedMarkdownTableLineRanges(this.view),
+			];
 
 			if (ranges.length === 0) {
 				return;
@@ -206,6 +216,151 @@ function copyFlashExtension(highlightSession: HighlightSession) {
 		flashField,
 		copyFlashViewPlugin,
 	];
+}
+
+function findSelectedMarkdownTableLineRanges(view: EditorView): FlashRange[] {
+	const tableLines = new Set<number>();
+	const doc = view.state.doc;
+
+	for (const range of view.state.selection.ranges) {
+		if (range.empty) {
+			continue;
+		}
+
+		const fromLine = doc.lineAt(range.from);
+		const toLine = doc.lineAt(Math.max(range.from, range.to - 1));
+
+		for (let lineNumber = fromLine.number; lineNumber <= toLine.number; lineNumber += 1) {
+			const tableBlock = findMarkdownTableBlockAtLine(doc, lineNumber);
+
+			if (tableBlock === null) {
+				continue;
+			}
+
+			for (
+				let tableLineNumber = tableBlock.fromLine;
+				tableLineNumber <= tableBlock.toLine;
+				tableLineNumber += 1
+			) {
+				tableLines.add(tableLineNumber);
+			}
+		}
+	}
+
+	return Array.from(tableLines)
+		.sort((left, right) => left - right)
+		.map((lineNumber) => {
+			const line = doc.line(lineNumber);
+			return {
+				from: line.from,
+				to: line.from,
+				kind: "line" as const,
+			};
+		});
+}
+
+function findMarkdownTableBlockAtLine(
+	doc: EditorView["state"]["doc"],
+	lineNumber: number
+): { fromLine: number; toLine: number } | null {
+	const line = doc.line(lineNumber);
+
+	if (!isMarkdownTableLine(line.text) || isInsideFencedCodeBlock(doc, lineNumber)) {
+		return null;
+	}
+
+	let separatorLineNumber: number | null = null;
+
+	for (let currentLineNumber = lineNumber; currentLineNumber >= 1; currentLineNumber -= 1) {
+		const currentLine = doc.line(currentLineNumber).text;
+
+		if (isMarkdownTableSeparatorLine(currentLine)) {
+			const headerLineNumber = currentLineNumber - 1;
+
+			if (headerLineNumber >= 1 && isMarkdownTableContentLine(doc.line(headerLineNumber).text)) {
+				separatorLineNumber = currentLineNumber;
+			}
+
+			break;
+		}
+
+		if (currentLineNumber < lineNumber && !isMarkdownTableContentLine(currentLine)) {
+			break;
+		}
+	}
+
+	if (
+		separatorLineNumber === null
+		&& lineNumber < doc.lines
+		&& isMarkdownTableSeparatorLine(doc.line(lineNumber + 1).text)
+	) {
+		separatorLineNumber = lineNumber + 1;
+	}
+
+	if (separatorLineNumber === null) {
+		return null;
+	}
+
+	const fromLine = separatorLineNumber - 1;
+	let toLine = separatorLineNumber;
+
+	while (toLine < doc.lines) {
+		const nextLine = doc.line(toLine + 1).text;
+
+		if (!isMarkdownTableContentLine(nextLine) || isMarkdownTableSeparatorLine(nextLine)) {
+			break;
+		}
+
+		toLine += 1;
+	}
+
+	if (lineNumber < fromLine || lineNumber > toLine) {
+		return null;
+	}
+
+	return { fromLine, toLine };
+}
+
+function isInsideFencedCodeBlock(doc: EditorView["state"]["doc"], lineNumber: number) {
+	let insideFence = false;
+
+	for (let currentLineNumber = 1; currentLineNumber < lineNumber; currentLineNumber += 1) {
+		if (isMarkdownFenceLine(doc.line(currentLineNumber).text)) {
+			insideFence = !insideFence;
+		}
+	}
+
+	return insideFence;
+}
+
+function isMarkdownFenceLine(lineText: string) {
+	return /^\s*(```+|~~~+)/.test(lineText);
+}
+
+function isMarkdownTableLine(lineText: string) {
+	return isMarkdownTableContentLine(lineText) || isMarkdownTableSeparatorLine(lineText);
+}
+
+function isMarkdownTableContentLine(lineText: string) {
+	return splitMarkdownTableCells(lineText).length >= 2;
+}
+
+function isMarkdownTableSeparatorLine(lineText: string) {
+	const cells = splitMarkdownTableCells(lineText);
+
+	return cells.length >= 2 && cells.every((cell) => /^:?-{3,}:?$/.test(cell.trim()));
+}
+
+function splitMarkdownTableCells(lineText: string) {
+	const trimmed = lineText.trim();
+
+	if (!trimmed.includes("|")) {
+		return [];
+	}
+
+	const withoutEdges = trimmed.replace(/^\|/, "").replace(/\|$/, "");
+
+	return withoutEdges.split("|");
 }
 
 export default class CopyHighlighterPlugin extends Plugin {

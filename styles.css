@@ -3,6 +3,18 @@
 	border-radius: var(--copy-highlighter-border-radius, 3px);
 }
 
+.copy-highlighter-editor-line-highlight {
+	background-color: var(--copy-highlighter-editor-background, rgba(255, 213, 79, 0.5));
+	border-radius: var(--copy-highlighter-border-radius, 3px);
+}
+
+.copy-highlighter-editor-line-highlight table,
+.copy-highlighter-editor-line-highlight .cm-table-widget,
+.copy-highlighter-editor-line-highlight .HyperMD-table-row {
+	background-color: var(--copy-highlighter-editor-background, rgba(255, 213, 79, 0.5));
+	border-radius: var(--copy-highlighter-border-radius, 3px);
+}
+
 .copy-highlighter-dom-highlight {
 	position: absolute;
 	z-index: 9999;
