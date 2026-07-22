@@ -1,6 +1,6 @@
 {
 	"name": "copy-highlighter",
-	"version": "0.2.4",
+	"version": "0.2.5",
 	"description": "Highlights copied text.",
 	"main": "main.js",
 	"type": "module",

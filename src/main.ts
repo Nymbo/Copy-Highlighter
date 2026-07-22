@@ -72,6 +72,7 @@ const flashField = StateField.define<DecorationSet>({
 
 class HighlightSession {
 	private clearers = new Set<ClearHighlight>();
+	private editorHandledCopies = new WeakSet<Event>();
 	private ctrlOrMetaDown = false;
 	private cDown = false;
 	private fallbackTimer: number | null = null;
@@ -84,6 +85,14 @@ class HighlightSession {
 		return () => {
 			this.clearers.delete(clearHighlight);
 		};
+	}
+
+	markEditorCopy(event: Event) {
+		this.editorHandledCopies.add(event);
+	}
+
+	wasEditorCopy(event: Event) {
+		return this.editorHandledCopies.has(event);
 	}
 
 	handleKeyDown(event: KeyboardEvent) {
@@ -148,7 +157,10 @@ class HighlightSession {
 	}
 }
 
-function copyFlashExtension(highlightSession: HighlightSession) {
+function copyFlashExtension(
+	highlightSession: HighlightSession,
+	flashTableWidgets: (elements: Element[]) => void
+) {
 	class CopyFlashView {
 		private unregister: (() => void) | null = null;
 
@@ -170,7 +182,7 @@ function copyFlashExtension(highlightSession: HighlightSession) {
 			}
 		}
 
-		flashCopiedSelection() {
+		flashCopiedSelection(): boolean {
 			const ranges = this.view.state.selection.ranges
 				.filter((range) => !range.empty)
 				.map((range) => ({
@@ -179,14 +191,36 @@ function copyFlashExtension(highlightSession: HighlightSession) {
 				}));
 
 			if (ranges.length === 0) {
-				return;
+				return false;
 			}
 
 			this.registerClearer();
 			this.view.dispatch({
 				effects: addFlash.of(ranges),
 			});
+
+			// Tables render as widgets that replace their source lines, so mark
+			// decorations are invisible there. Overlay the widgets directly.
+			// Called even with no widgets so stale overlays from a previous
+			// copy are replaced, matching how addFlash replaces marks.
+			flashTableWidgets(this.findCopiedTableWidgets(ranges));
+
 			highlightSession.beginCopyHighlight();
+			return true;
+		}
+
+		private findCopiedTableWidgets(ranges: FlashRange[]): Element[] {
+			const widgets: Element[] = [];
+
+			for (const widget of Array.from(this.view.contentDOM.querySelectorAll(".cm-table-widget"))) {
+				const widgetPos = this.view.posAtDOM(widget);
+
+				if (ranges.some((range) => widgetPos >= range.from && widgetPos < range.to)) {
+					widgets.push(widget);
+				}
+			}
+
+			return widgets;
 		}
 	}
 
@@ -194,9 +228,12 @@ function copyFlashExtension(highlightSession: HighlightSession) {
 		(view) => new CopyFlashView(view),
 		{
 			eventHandlers: {
-				copy(_event, view) {
+				copy(event, view) {
 					const plugin = view.plugin(copyFlashViewPlugin);
-					plugin?.flashCopiedSelection();
+
+					if (plugin?.flashCopiedSelection()) {
+						highlightSession.markEditorCopy(event);
+					}
 				},
 			},
 		}
@@ -222,7 +259,10 @@ export default class CopyHighlighterPlugin extends Plugin {
 			this.clearDomHighlights();
 		});
 
-		this.registerEditorExtension(copyFlashExtension(this.highlightSession));
+		this.registerEditorExtension(copyFlashExtension(
+			this.highlightSession,
+			(elements) => this.flashTableWidgets(elements)
+		));
 
 		this.registerDomEvent(activeDocument, "keydown", (event) => {
 			this.highlightSession.handleKeyDown(event);
@@ -266,10 +306,25 @@ export default class CopyHighlighterPlugin extends Plugin {
 			return;
 		}
 
-		if (target.closest(".cm-editor") !== null) {
+		// The editor extension owns editor copies, except inside Live Preview
+		// table widgets, where selections are plain DOM and CM never flashes.
+		if (target.closest(".cm-editor") !== null && target.closest(".cm-table-widget") === null) {
 			return;
 		}
 
+		// This capture listener runs before the editor extension sees the same
+		// event, so defer until the dispatch finishes to avoid double-flashing.
+		queueMicrotask(() => {
+			if (!this.highlightSession.wasEditorCopy(event)) {
+				// Key-repeat re-fires copy while the chord is held; replace the
+				// previous flash instead of stacking translucent overlays.
+				this.clearDomHighlights();
+				this.flashSelectionRects(target);
+			}
+		});
+	}
+
+	private flashSelectionRects(target: Element) {
 		const selection = target.ownerDocument.getSelection();
 
 		if (selection === null || selection.isCollapsed || selection.rangeCount === 0) {
@@ -294,29 +349,49 @@ export default class CopyHighlighterPlugin extends Plugin {
 	}
 
 	private flashRange(range: Range) {
+		const ownerDocument = range.commonAncestorContainer.ownerDocument ?? activeDocument;
 		const rects = Array.from(range.getClientRects())
 			.filter((rect) => rect.width > 0 && rect.height > 0)
 			.slice(0, MAX_DOM_FLASH_RECTS);
 
 		for (const rect of rects) {
-			const ownerDocument = range.commonAncestorContainer.ownerDocument ?? activeDocument;
-			const ownerWindow = ownerDocument.defaultView ?? activeWindow;
-			const overlay = ownerDocument.createElement("div");
-
-			overlay.className = "copy-highlighter-dom-highlight";
-			overlay.style.left = `${rect.left + ownerWindow.scrollX}px`;
-			overlay.style.top = `${rect.top + ownerWindow.scrollY}px`;
-			overlay.style.width = `${rect.width}px`;
-			overlay.style.height = `${rect.height}px`;
-			overlay.style.backgroundColor = hexToRgba(
-				this.settings.highlightColor,
-				this.settings.renderedOpacity
-			);
-			overlay.style.borderRadius = `${this.settings.borderRadius}px`;
-
-			ownerDocument.body.appendChild(overlay);
-			this.domHighlights.add(overlay);
+			this.createOverlay(ownerDocument, rect);
 		}
+	}
+
+	private flashTableWidgets(elements: Element[]) {
+		this.clearDomHighlights();
+
+		if (!this.settings.enableRenderedMarkdownHighlight) {
+			return;
+		}
+
+		for (const element of elements) {
+			const rect = element.getBoundingClientRect();
+
+			if (rect.width > 0 && rect.height > 0) {
+				this.createOverlay(element.ownerDocument, rect);
+			}
+		}
+	}
+
+	private createOverlay(ownerDocument: Document, rect: DOMRect) {
+		const ownerWindow = ownerDocument.defaultView ?? activeWindow;
+		const overlay = ownerDocument.createElement("div");
+
+		overlay.className = "copy-highlighter-dom-highlight";
+		overlay.style.left = `${rect.left + ownerWindow.scrollX}px`;
+		overlay.style.top = `${rect.top + ownerWindow.scrollY}px`;
+		overlay.style.width = `${rect.width}px`;
+		overlay.style.height = `${rect.height}px`;
+		overlay.style.backgroundColor = hexToRgba(
+			this.settings.highlightColor,
+			this.settings.renderedOpacity
+		);
+		overlay.style.borderRadius = `${this.settings.borderRadius}px`;
+
+		ownerDocument.body.appendChild(overlay);
+		this.domHighlights.add(overlay);
 	}
 
 	private clearDomHighlights() {
